@@ -1,0 +1,69 @@
+use crate::auth::Permissions;
+use chrono::{DateTime, Utc};
+use sqlx::{query, query_as, FromRow, PgPool};
+use uuid::Uuid;
+
+#[derive(FromRow)]
+pub struct SessionInfo {
+    session_id: Uuid,
+    expiration_date: DateTime<Utc>,
+    username: Option<String>,
+    permissions: Option<String>,
+}
+
+pub enum SessionError {
+    UuidNotFound,
+    SessionExpired,
+}
+
+impl SessionInfo {
+    async fn try_insert(&self, database: &PgPool) -> Result<(), sqlx::Error> {
+        let query_stmt = include_str!("../../postgres/session/insert_session.sql");
+        let query_prepared = sqlx::query(query_stmt)
+            .bind(self.session_id)
+            .bind(self.expiration_date)
+            .bind(&self.username)
+            .bind(&self.permissions);
+
+        match query_prepared.execute(database).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn try_read(uuid: Uuid, database: &PgPool) -> Result<Option<Self>, sqlx::Error> {
+        let query_stmt = include_str!("../../postgres/session/read_session.sql");
+        let query_prepared = query_as(&query_stmt).bind(&uuid);
+
+        Ok(query_prepared.fetch_optional(database).await?)
+    }
+
+    fn new(uuid: Uuid) -> SessionInfo {
+        let expiration_date = chrono::Utc::now() + *crate::SESSION_TIME;
+
+        SessionInfo {
+            session_id: uuid,
+            expiration_date: expiration_date,
+            username: None,
+            permissions: None,
+        }
+    }
+}
+
+async fn fresh_session(database: &PgPool) -> Result<Uuid, String> {
+    loop {
+        let uuid = Uuid::new_v4();
+
+        let fresh_info = SessionInfo::new(uuid);
+
+        match fresh_info.try_insert(database).await {
+            Ok(()) => return Ok(uuid),
+            Err(sqlx::Error::Database(e)) if e.constraint() == Some("session_id") => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+async fn check_session(uuid: Uuid, database: &PgPool) -> Result<SessionInfo, SessionError> {
+      
+}
