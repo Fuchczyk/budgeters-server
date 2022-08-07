@@ -2,8 +2,9 @@ mod credentials;
 mod guards;
 mod service;
 
+use axum::Router;
 pub use credentials::Hasher;
-pub use service::check_permissions;
+pub use guards::{AdminGuard, ModeratorGuard, Unauthorized, UserGuard};
 pub use service::AuthError;
 
 use std::{fmt::Display, str::FromStr};
@@ -20,9 +21,9 @@ pub enum Permissions {
 impl Display for Permissions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let result_string = match &self {
-            &Permissions::User => "user",
-            &Permissions::Admin => "admin",
-            &Permissions::Moderator => "moderator",
+            &Permissions::User => "User",
+            &Permissions::Admin => "Admin",
+            &Permissions::Moderator => "Moderator",
         };
 
         write!(f, "{result_string}")
@@ -34,16 +35,20 @@ impl FromStr for Permissions {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "user" => Ok(Permissions::User),
-            "admin" => Ok(Permissions::Admin),
-            "moderator" => Ok(Permissions::Moderator),
+            "User" => Ok(Permissions::User),
+            "Admin" => Ok(Permissions::Admin),
+            "Moderator" => Ok(Permissions::Moderator),
             _ => Err("Given string does not represent application's permission."),
         }
     }
 }
 
+pub fn routes() -> Router {
+    Router::new().route("/signup", axum::routing::post(service::register))
+}
+
 mod tests {
-    use super::*;
+    use super::Permissions;
 
     #[test]
     fn permissions_hierarchy() {

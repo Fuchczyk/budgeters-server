@@ -23,9 +23,9 @@ pub async fn initialize_database_pool() -> PgPool {
         )
         .ssl_mode(sqlx::postgres::PgSslMode::Prefer);
 
-    let pool = PgPool::connect_with(connect_options)
-        .await
-        .expect("Unable to establish connection with PostgreSQL database.");
+    
 
-    pool
+    PgPool::connect_with(connect_options)
+        .await
+        .expect("Unable to establish connection with PostgreSQL database.")
 }

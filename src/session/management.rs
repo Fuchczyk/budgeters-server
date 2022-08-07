@@ -1,15 +1,16 @@
 use axum::{
-    extract::{FromRequest, RequestParts},
     headers::{Cookie as HeaderCookie, HeaderMapExt},
-    http::{header::SET_COOKIE, response, HeaderValue, Request, StatusCode},
+    http::{
+        header::{COOKIE, SET_COOKIE},
+        HeaderValue, Request, StatusCode,
+    },
     middleware::Next,
-    response::{IntoResponse, Response},
-    Extension,
+    response::Response,
 };
 use sqlx::PgPool;
 
-use crate::{auth::Permissions, session::verify_session_id};
-use async_trait::async_trait;
+use crate::session::verify_session_id;
+
 use cookie::{Cookie, CookieBuilder};
 use std::sync::Arc;
 
@@ -29,7 +30,6 @@ async fn create_session<B>(
     mut req: Request<B>,
     next: Next<B>,
 ) -> Result<Response, (StatusCode, String)> {
-    println!("{:?}", req.extensions());
     let database = match req.extensions().get::<Arc<PgPool>>() {
         Some(db) => db,
         None => {
@@ -45,8 +45,8 @@ async fn create_session<B>(
         Ok(id) => {
             let cookie = create_session_cookie(id);
             req.headers_mut().insert(
-                SESSION_COOKIE_NAME,
-                HeaderValue::from_str(cookie.value()).unwrap(),
+                COOKIE,
+                HeaderValue::from_str(&cookie.stripped().to_string()).unwrap(),
             );
 
             let mut response = next.run(req).await;
@@ -96,13 +96,9 @@ pub async fn ensure_session<B>(
     };
 
     if let Some(session_id) = cookies.get(SESSION_COOKIE_NAME) {
-        match verify_session_id(session_id.into(), database).await {
-            Ok(true) => {
-                return Ok(next.run(req).await);
-            }
-            Ok(false) => {
-                return create_session(req, next).await;
-            }
+        match verify_session_id(session_id, database).await {
+            Ok(true) => Ok(next.run(req).await),
+            Ok(false) => create_session(req, next).await,
             Err(error) => {
                 tracing::error!(
                     "Error while veryfing session_id. SessionId=[{}], Error=[{}]",
@@ -110,10 +106,10 @@ pub async fn ensure_session<B>(
                     error
                 );
 
-                return Err((
+                Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Unable to verify session id.".into(),
-                ));
+                ))
             }
         }
     } else {

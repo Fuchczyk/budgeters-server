@@ -2,16 +2,13 @@ mod auth;
 mod database;
 mod session;
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
-use axum::{
-    extract::Path, http::StatusCode, middleware::from_fn, response::IntoResponse, Extension,
-    Router, Server,
-};
+use axum::{middleware::from_fn, Extension, Router, Server};
 use chrono::Duration;
 use dotenv::dotenv;
 use lazy_static::lazy_static;
-use sqlx::{PgPool, Pool, Postgres};
+
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 lazy_static! {
@@ -30,10 +27,13 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let hasher = auth::Hasher::new(&*PEPPER.as_slice());
+    let hasher = auth::Hasher::new(PEPPER.as_slice());
     let database_connection = Arc::new(database::initialize_database_pool().await);
 
+    let auth_router = auth::routes();
+
     let server_router = Router::new()
+        .nest("/auth", auth_router)
         .layer(from_fn(session::ensure_session))
         .layer(Extension(database_connection))
         .layer(Extension(Arc::new(hasher)))

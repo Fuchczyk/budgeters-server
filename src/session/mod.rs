@@ -69,9 +69,9 @@ impl SessionInfo {
         database: &PgPool,
     ) -> Result<Option<Self>, sqlx::Error> {
         let query_stmt = include_str!("../../postgres/session/read_session.sql");
-        let query_prepared = query_as(&query_stmt).bind(&session_id);
+        let query_prepared = query_as(query_stmt).bind(&session_id);
 
-        Ok(query_prepared.fetch_optional(database).await?)
+        query_prepared.fetch_optional(database).await
     }
 
     fn new(session_id: SessionId) -> SessionInfo {
@@ -79,7 +79,7 @@ impl SessionInfo {
 
         SessionInfo {
             session_id,
-            expiration_date: expiration_date,
+            expiration_date,
             username: None,
         }
     }
@@ -87,7 +87,7 @@ impl SessionInfo {
     pub fn username(&self) -> Option<&str> {
         match &self.username {
             None => None,
-            Some(username) => Some(&username),
+            Some(username) => Some(username),
         }
     }
 
@@ -173,7 +173,7 @@ pub async fn update_session(
     let update_stmt = include_str!("../../postgres/session/update_session.sql");
     let expiration_date = chrono::Utc::now().naive_utc() + *crate::SESSION_TIME;
 
-    let query_prepared = query(&update_stmt)
+    let query_prepared = query(update_stmt)
         .bind(username)
         .bind(&expiration_date)
         .bind(&session_id);
@@ -196,7 +196,7 @@ async fn remove_session(
 ) -> Result<(), SessionError> {
     let remove_stmt = include_str!("../../postgres/session/remove_session.sql");
 
-    let query_prepared = query(&remove_stmt).bind(session_id);
+    let query_prepared = query(remove_stmt).bind(session_id);
 
     match query_prepared.execute(database).await {
         Ok(_) => Ok(()),
@@ -288,7 +288,7 @@ where
             }
         };
 
-        match SessionInfo::try_read(&session_id, database).await {
+        match SessionInfo::try_read(session_id, database).await {
             Ok(Some(info)) => Ok(info),
             Ok(None) => {
                 tracing::warn!(
