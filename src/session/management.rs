@@ -1,128 +1,122 @@
 use axum::{
     extract::{FromRequest, RequestParts},
-    http::{response, StatusCode},
-    response::IntoResponse,
+    headers::{Cookie as HeaderCookie, HeaderMapExt},
+    http::{header::SET_COOKIE, response, HeaderValue, Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
     Extension,
 };
-use axum_extra::extract::PrivateCookieJar;
 use sqlx::PgPool;
 
-use crate::auth::Permissions;
+use crate::{auth::Permissions, session::verify_session_id};
 use async_trait::async_trait;
+use cookie::{Cookie, CookieBuilder};
+use std::sync::Arc;
 
-const SESSION_COOKIE_NAME: &str = "budgeters_session";
+use super::SessionId;
 
-pub struct Session {
-    username: Option<String>,
-    permissions: Option<Permissions>,
+pub(super) const SESSION_COOKIE_NAME: &str = "budgeters_session";
+
+fn create_session_cookie(session_id: SessionId) -> Cookie<'static> {
+    CookieBuilder::new(SESSION_COOKIE_NAME, session_id)
+        .secure(true)
+        // TODO: Expiration parameter.
+        .http_only(true)
+        .finish()
 }
 
-impl Session {
-    fn new(username: Option<String>, permissions: Option<Permissions>) -> Self {
-        Self {
-            username,
-            permissions,
+async fn create_session<B>(
+    mut req: Request<B>,
+    next: Next<B>,
+) -> Result<Response, (StatusCode, String)> {
+    println!("{:?}", req.extensions());
+    let database = match req.extensions().get::<Arc<PgPool>>() {
+        Some(db) => db,
+        None => {
+            tracing::error!("Unable to get database handler from Request.");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to establish connection to database.".into(),
+            ));
+        }
+    };
+
+    match super::fresh_session(database).await {
+        Ok(id) => {
+            let cookie = create_session_cookie(id);
+            req.headers_mut().insert(
+                SESSION_COOKIE_NAME,
+                HeaderValue::from_str(cookie.value()).unwrap(),
+            );
+
+            let mut response = next.run(req).await;
+            response.headers_mut().insert(
+                SET_COOKIE,
+                HeaderValue::from_str(&cookie.to_string()).unwrap(),
+            );
+
+            Ok(response)
+        }
+        Err(error) => {
+            tracing::error!("Error giving fresh session_id. Error=[{}]", error);
+
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to give new session id.".into(),
+            ))
         }
     }
 }
 
-#[async_trait]
-impl<R> FromRequest<R> for Session
-where
-    R: Send,
-{
-    type Rejection = (StatusCode, Option<PrivateCookieJar>, String);
+pub async fn ensure_session<B>(
+    req: Request<B>,
+    next: Next<B>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookies = match req.headers().typed_get::<HeaderCookie>() {
+        Some(cookies) => cookies,
+        None => {
+            return create_session(req, next).await;
+            tracing::debug!("Unable to get cookies from response.");
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Unable to read cookies from request.".into(),
+            ));
+        }
+    };
 
-    async fn from_request(req: &mut RequestParts<R>) -> Result<Self, Self::Rejection> {
-        let db_try = req.extract::<Extension<PgPool>>().await;
-        let database = match db_try {
-            Ok(db) => db,
-            Err(_) => {
+    let database = match req.extensions().get::<Arc<PgPool>>() {
+        Some(db) => db,
+        None => {
+            tracing::error!("Unable to get database handler from Request.");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to establish connection to database.".into(),
+            ));
+        }
+    };
+
+    if let Some(session_id) = cookies.get(SESSION_COOKIE_NAME) {
+        match verify_session_id(session_id.into(), database).await {
+            Ok(true) => {
+                return Ok(next.run(req).await);
+            }
+            Ok(false) => {
+                return create_session(req, next).await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    "Error while veryfing session_id. SessionId=[{}], Error=[{}]",
+                    session_id,
+                    error
+                );
+
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    None,
-                    "Unable to extract database from RequestParts.".into(),
+                    "Unable to verify session id.".into(),
                 ));
-            }
-        };
-
-        let cookie_try = req.extract::<PrivateCookieJar>().await;
-        let mut priv_cookies = match cookie_try {
-            Ok(cj) => cj,
-            Err(_) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    None,
-                    "Unable to extract private cookies from RequestParts.".into(),
-                ));
-            }
-        };
-
-        match priv_cookies.get(SESSION_COOKIE_NAME) {
-            None => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    None,
-                    "Session cookie should always be present.".into(),
-                ));
-            }
-            Some(cookie) => {
-                let uuid: uuid::Uuid = match cookie.value().parse() {
-                    Ok(uuid) => uuid,
-                    Err(_) => {
-                        priv_cookies = priv_cookies.remove(cookie);
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            Some(priv_cookies),
-                            "Session cookie's value is invalid.".into(),
-                        ));
-                    }
-                };
-
-                let session_info = match super::check_session(uuid, &database.0).await {
-                    Err(super::SessionError::UuidNotFound) => {
-                        priv_cookies = priv_cookies.remove(cookie);
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            Some(priv_cookies),
-                            "Session cookie's value cannot be found in database.".into(),
-                        ));
-                    }
-                    Err(_) => {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            None,
-                            "Unable to communicate with session database.".into(),
-                        ));
-                    }
-                    Ok(session_info) => session_info,
-                };
-
-                if let Some(username) = session_info.username() {
-                    match crate::auth::check_permissions(username, &database.0).await {
-                        Ok(perm) => Ok(Session::new(Some(username.into()), Some(perm))),
-                        Err(crate::auth::AuthError::InvalidUsername) => {
-                            priv_cookies = priv_cookies.remove(cookie);
-                            return Err((
-                                StatusCode::BAD_REQUEST,
-                                Some(priv_cookies),
-                                "Username connected to session cookie cannot be found in database."
-                                    .into(),
-                            ));
-                        }
-                        Err(crate::auth::AuthError::DatabaseError(error)) => {
-                            // TODO! LOG ERROR
-                            return Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                None,
-                                "Internal database server error.".into(),
-                            ));
-                        }
-                    }
-                } else {
-                    Ok(Session::new(None, None))
-                }
             }
         }
+    } else {
+        create_session(req, next).await
     }
 }

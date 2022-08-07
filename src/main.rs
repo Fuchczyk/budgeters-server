@@ -4,11 +4,15 @@ mod session;
 
 use std::{str::FromStr, sync::Arc};
 
-use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension, Router, Server};
+use axum::{
+    extract::Path, http::StatusCode, middleware::from_fn, response::IntoResponse, Extension,
+    Router, Server,
+};
 use chrono::Duration;
 use dotenv::dotenv;
 use lazy_static::lazy_static;
 use sqlx::{PgPool, Pool, Postgres};
+use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 lazy_static! {
     static ref SESSION_TIME: Duration = Duration::hours(2);
@@ -18,16 +22,22 @@ lazy_static! {
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "budgeters_server=debug,tower_http=debug".into()),
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     let hasher = auth::Hasher::new(&*PEPPER.as_slice());
-    let database_connection = database::initialize_database_pool().await;
+    let database_connection = Arc::new(database::initialize_database_pool().await);
 
     let server_router = Router::new()
-        .route("/get", axum::routing::get(test))
-        .route("/check/:uuid", axum::routing::get(test_uuid))
-        .layer(Extension(Arc::new(database_connection)))
-        .layer(Extension(Arc::new(hasher)));
-
+        .layer(from_fn(session::ensure_session))
+        .layer(Extension(database_connection))
+        .layer(Extension(Arc::new(hasher)))
+        .layer(tower_http::trace::TraceLayer::new_for_http());
     let server_address = std::env::var("BG_SERVERADDRESS").unwrap();
 
     let server_outcome = Server::bind(
@@ -39,17 +49,4 @@ async fn main() {
     .await;
 
     println!("SERVER OUTCOME IS {server_outcome:?}");
-}
-
-async fn test(database: Extension<Pool<Postgres>>) -> impl IntoResponse {
-    let uuid = session::fresh_session(&database.0).await;
-
-    (StatusCode::OK, format!("Got uuid = {uuid:?}"))
-}
-
-async fn test_uuid(database: Extension<Pool<Postgres>>, uuid: Path<String>) -> impl IntoResponse {
-    let status =
-        session::check_session(uuid::Uuid::from_str(uuid.as_str()).unwrap(), &database.0).await;
-
-    (StatusCode::OK, format!("Got stuct = {status:?}"))
 }

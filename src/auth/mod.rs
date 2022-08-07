@@ -1,4 +1,5 @@
 mod credentials;
+mod guards;
 mod service;
 
 pub use credentials::Hasher;

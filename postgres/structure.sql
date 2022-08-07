@@ -4,7 +4,7 @@ DROP SCHEMA IF EXISTS credentials CASCADE;
 CREATE SCHEMA IF NOT EXISTS credentials;
 
 CREATE TABLE credentials.session_info (
-    session_id UUID UNIQUE NOT NULL,
+    session_id VARCHAR UNIQUE NOT NULL,
     expiration_date TIMESTAMP NOT NULL,
     username VARCHAR
 );
